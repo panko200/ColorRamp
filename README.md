@@ -1,6 +1,6 @@
 カラーランプ
 製作者：Panko200
-配布場所：///
+配布場所：https://github.com/panko200/ColorRamp
 
 ## 概要
 
