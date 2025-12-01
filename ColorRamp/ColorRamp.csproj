@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
@@ -15,14 +15,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Extended.Wpf.Toolkit" Version="5.0.0" />
     <PackageReference Include="Microsoft.Xaml.Behaviors.Wpf" Version="1.1.135" />
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Extended.Wpf.Toolkit">
-      <HintPath>C:\Users\masafumi\.nuget\packages\extended.wpf.toolkit\5.0.0\lib\net40\Xceed.Wpf.Toolkit.dll</HintPath>
-    </Reference>
     <Reference Include="YukkuriMovieMaker.Controls">
       <HintPath>$(YMM4DirPath)YukkuriMovieMaker.Controls.dll</HintPath>
     </Reference>
@@ -48,11 +44,6 @@
 
   <!--ビルド後にYMM4のプラグインフォルダにdllをコピーする-->
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <ItemGroup>
-      <PluginFiles Include="$(TargetDir)*.dll" />
-    </ItemGroup>
-    <MakeDir Directories="$(YMM4DirPath)user\plugin\$(ProjectName)" ContinueOnError="true" />
-    <Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(YMM4DirPath)user\plugin\$(ProjectName)\" SkipUnchangedFiles="true" />
+    <Exec Command="mkdir &quot;$(YMM4DirPath)user\plugin\$(ProjectName)&quot; &gt; NUL 2&gt;&amp;1&#xD;&#xA;copy &quot;$(TargetPath)&quot; &quot;$(YMM4DirPath)user\plugin\$(ProjectName)\&quot;" />
   </Target>
-
 </Project>

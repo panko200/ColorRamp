@@ -16,8 +16,6 @@ namespace ColorRamp
     [VideoEffect("カラーランプ", ["加工"], ["ColorRamp","カラーランプ"])]
     internal class ColorRampEffect : VideoEffectBase, INotifyPropertyChanged
     {
-        public new event PropertyChangedEventHandler? PropertyChanged;
-
         public override string Label => "カラーランプ";
 
         // 実体としてのフィールド

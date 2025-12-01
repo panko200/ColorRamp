@@ -118,11 +118,9 @@ namespace ColorRamp
             }
 
             // --- 2. 合成強度 (Factor) ---
-            // これはアニメーションする可能性が高いので毎回計算してもOKですが、
-            // 気になるならここも前回値と比較しても良いです。
             float factor = (float)item.ColorRampFactor.GetValue(frame, length, fps) / 100.0f;
             factor = Math.Clamp(factor, 0f, 1f);
-            factor = Math.Abs(factor - 1.0f);
+            factor = 1.0f - factor;
             crossFadeEffect.SetValue(0, factor);
 
             return effectDescription.DrawDescription;
