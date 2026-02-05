@@ -28,13 +28,28 @@ namespace ColorRamp
         [AnimationSlider("F1", "％", 0, 100)]
         public Animation ColorRampFactor { get; } = new Animation(100, 0, 100);
 
-        [Display(GroupName = "カラーランプ", Name = "不透明度読み込み", Description = "不透明度を使ってグラデーションします。透明なほど黒側に近づきます。透明な部分はグラデーションによって塗りつぶしされます。")]
-        [ToggleSlider]
-        public bool LoadOpacityToggle { get => loadOpacityToggle; set => Set(ref loadOpacityToggle, value); }
-        bool loadOpacityToggle = false;
+        // ★追加: 入力チャンネルの定義
+        public enum GradientInputChannel
+        {
+            [Display(Name = "R (赤)")] R,
+            [Display(Name = "G (緑)")] G,
+            [Display(Name = "B (青)")] B,
+            [Display(Name = "H (色相)")] H,
+            [Display(Name = "S (彩度)")] S,
+            [Display(Name = "L (輝度)")] L,
+            [Display(Name = "V (明度)")] V,
+            [Display(Name = "A (不透明度)")] A // ★追加
+        }
+
+        // ★追加: 入力チャンネル選択 (デフォルトはL)
+        [Display(GroupName = "カラーランプ", Name = "入力値", Description = "グラデーションの参照元となるチャンネルを選択します。")]
+        [EnumComboBox]
+        public GradientInputChannel InputChannel { get => inputChannel; set => Set(ref inputChannel, value); }
+        private GradientInputChannel inputChannel = GradientInputChannel.L;
+
+        // --- ブリッジパターンの実装 ---
 
         // 1. 公開プロパティ (YMM4本体、Undo/Redo、保存読み込み用)
-        // ここに値が入るのは プロジェクト読み込み時 や Undo/Redo時
         [Display(GroupName = "カラーランプ", Name = "グラデーション", Description = "左が黒側、右が白側。ポイントを追加・編集します")]
         [GradientEditor]
         public ImmutableList<GradientPoint> Points
@@ -44,8 +59,6 @@ namespace ColorRamp
             {
                 if (_points == value) return;
                 Set(ref _points, value);
-
-                // UI側に「システム側から変更があったよ」と通知する
                 OnPointsChangedBySystem?.Invoke(this, value);
             }
         }
@@ -57,7 +70,6 @@ namespace ColorRamp
             set
             {
                 if (_points == value) return;
-                // 第3引数に "Points" を指定することで、「Pointsプロパティが変更された」としてUndo履歴に登録する
                 Set(ref _points, value, nameof(Points));
             }
         }
@@ -101,6 +113,39 @@ namespace ColorRamp
         public GradientInterpolationHSLHSV GradientInterpolationHSLHSVType { get => gradientInterpolationHSLHSVType; set => Set(ref gradientInterpolationHSLHSVType, value); }
         private GradientInterpolationHSLHSV gradientInterpolationHSLHSVType = GradientInterpolationHSLHSV.Near;
 
+        // ★追加: 合成モード設定
+        [Display(GroupName = "合成設定", Name = "合成モード", Description = "元画像とグラデーション結果をどの色空間で合成するか選択します。")]
+        [EnumComboBox]
+        public MixColorSpaceType MixColorSpace { get => mixColorSpace; set => Set(ref mixColorSpace, value); }
+        private MixColorSpaceType mixColorSpace = MixColorSpaceType.RGB;
+
+        public enum MixColorSpaceType
+        {
+            [Display(Name = "RGB")] RGB,
+            [Display(Name = "HSL")] HSL,
+            [Display(Name = "HSV")] HSV
+        }
+
+        [Display(GroupName = "合成設定", Name = "CH1 維持 (R / H)", Description = "ONにすると、このチャンネル成分はグラデーションではなく元画像の値を使用します。\nRGBモード: 赤(Red)\nHSL/HSVモード: 色相(Hue)")]
+        [ToggleSlider]
+        public bool KeepCh1 { get => keepCh1; set => Set(ref keepCh1, value); }
+        bool keepCh1 = false;
+
+        [Display(GroupName = "合成設定", Name = "CH2 維持 (G / S)", Description = "ONにすると、このチャンネル成分はグラデーションではなく元画像の値を使用します。\nRGBモード: 緑(Green)\nHSL/HSVモード: 彩度(Saturation)")]
+        [ToggleSlider]
+        public bool KeepCh2 { get => keepCh2; set => Set(ref keepCh2, value); }
+        bool keepCh2 = false;
+
+        [Display(GroupName = "合成設定", Name = "CH3 維持 (B / L / V)", Description = "ONにすると、このチャンネル成分はグラデーションではなく元画像の値を使用します。\nRGBモード: 青(Blue)\nHSLモード: 輝度(Luminance)\nHSVモード: 明度(Value)")]
+        [ToggleSlider]
+        public bool KeepCh3 { get => keepCh3; set => Set(ref keepCh3, value); }
+        bool keepCh3 = false;
+
+        [Display(GroupName = "合成設定", Name = "不透明度(A) 維持", Description = "ONにすると、グラデーションの不透明度ではなく、元画像の不透明度を使用します。")]
+        [ToggleSlider]
+        public bool KeepAlpha { get => keepAlpha; set => Set(ref keepAlpha, value); }
+        bool keepAlpha = true;
+
         public enum GradientInterpolationHSLHSV
         {
             [Display(Name = "接近")] Near,
@@ -108,6 +153,12 @@ namespace ColorRamp
             [Display(Name = "時計回り")] Clockwise,
             [Display(Name = "反時計回り")] CounterClockwise
         }
+
+        // ★変更: 名前と説明を少し調整（機能は「Aトグル」として優先動作）
+        [Display(GroupName = "互換性", Name = "互換不透明度を使用", Description = "オンにすると上記の設定に関わらず、不透明度(Alpha)を入力値として使用します。\n過去バージョンのColorRampを保持するための設定です。")]
+        [ToggleSlider]
+        public bool LoadOpacityToggle { get => loadOpacityToggle; set => Set(ref loadOpacityToggle, value); }
+        bool loadOpacityToggle = false;
 
         public override IVideoEffectProcessor CreateVideoEffect(IGraphicsDevicesAndContext devices)
             => new ColorRampEffectProcessor(devices, this);

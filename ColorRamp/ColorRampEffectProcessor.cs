@@ -15,22 +15,29 @@ namespace ColorRamp
     internal class ColorRampEffectProcessor : IVideoEffectProcessor
     {
         readonly ColorRampEffect item;
-        readonly ID2D1Effect inputFormatterEffect;
-        readonly ID2D1Effect mapEffect;
-        readonly ID2D1Effect compositeEffect;
-        readonly ID2D1Effect crossFadeEffect;
+
+        // エフェクトのパイプライン
+        readonly ID2D1Effect rgbToHueEffect;     // HSV変換用
+        readonly ID2D1Effect inputFormatterEffect; // ColorMatrix (チャンネル抽出・入力調整)
+        readonly ID2D1Effect mapEffect;          // TableTransfer (グラデーションマップ)
+        readonly ColorRampMixCustomEffect mixEffect;       // 合成用カスタムエフェクト
+        readonly ID2D1Effect crossFadeEffect;    // 最終合成用
         readonly ID2D1Image finalOutput;
 
         ID2D1Image? input;
 
-        // 配列を再利用してGCを減らします
+        // --- キャッシュ用フィールド ---
         readonly float[] tableR = new float[256];
         readonly float[] tableG = new float[256];
         readonly float[] tableB = new float[256];
         readonly float[] tableA = new float[256];
 
-        // 前回の状態を覚えておく変数
-        bool? _lastLoadOpacityToggle = null;
+        // 変更検知用
+        // ★変更: LoadOpacityToggleは内部でInputChannel.Aとして扱うため、個別の検知変数は削除しても良いが
+        // 念のためロジック変更のトリガーとして残すか、まとめて管理します。
+        // ここでは「実効的な入力チャンネル」として管理するように変更します。
+        ColorRampEffect.GradientInputChannel? _lastEffectiveInputChannel = null;
+
         ImmutableList<GradientPoint>? _lastPoints = null;
         ColorRampEffect.GradientType? _lastCalcType = null;
         ColorRampEffect.GradientInterpolation? _lastInterpType = null;
@@ -40,17 +47,36 @@ namespace ColorRamp
         {
             this.item = item;
 
-            inputFormatterEffect = (ID2D1Effect)devices.DeviceContext.CreateEffect(EffectGuids.ColorMatrix);
+            // 1. RgbToHue (HSV/HSL変換用)
+            rgbToHueEffect = (ID2D1Effect)devices.DeviceContext.CreateEffect(EffectGuids.RgbToHue);
+            unsafe
+            {
+                uint val = (uint)RgbToHueOutputColorSpace.HueSaturationValue;
+                rgbToHueEffect.SetValue((int)RgbToHueProperties.OutputColorSpace, PropertyType.Enum, &val, sizeof(uint));
+            }
 
+            // 2. ColorMatrix (チャンネル抽出・モノクロ化)
+            inputFormatterEffect = (ID2D1Effect)devices.DeviceContext.CreateEffect(EffectGuids.ColorMatrix);
+            unsafe
+            {
+                uint alphaMode = (uint)ColorMatrixAlphaMode.Straight;
+                inputFormatterEffect.SetValue((int)ColorMatrixProperties.AlphaMode, PropertyType.Enum, &alphaMode, sizeof(uint));
+
+                int clamp = 1;
+                inputFormatterEffect.SetValue((int)ColorMatrixProperties.ClampOutput, PropertyType.Bool, &clamp, sizeof(int));
+            }
+
+            // 3. TableTransfer (グラデーションマップ)
             mapEffect = (ID2D1Effect)devices.DeviceContext.CreateEffect(EffectGuids.TableTransfer);
             mapEffect.SetInputEffect(0, inputFormatterEffect, true);
 
-            compositeEffect = (ID2D1Effect)devices.DeviceContext.CreateEffect(EffectGuids.Composite);
-            compositeEffect.SetValue((int)CompositeProperties.Mode, CompositeMode.DestinationIn);
+            // 4. MixEffect (カスタムシェーダーによる合成)
+            mixEffect = new ColorRampMixCustomEffect(devices);
+            mixEffect.SetInputEffect(0, mapEffect, true);
 
+            // 5. CrossFade (適用量調整)
             crossFadeEffect = (ID2D1Effect)devices.DeviceContext.CreateEffect(EffectGuids.CrossFade);
-            // 初期接続
-            crossFadeEffect.SetInputEffect(1, mapEffect, true);
+            crossFadeEffect.SetInputEffect(1, mixEffect, true);
 
             finalOutput = crossFadeEffect.Output ?? throw new NullReferenceException("Output is null");
         }
@@ -61,27 +87,43 @@ namespace ColorRamp
         {
             finalOutput.Dispose();
             crossFadeEffect.Dispose();
-            compositeEffect.Dispose();
+            mixEffect.Dispose();
             mapEffect.Dispose();
             inputFormatterEffect.Dispose();
+            rgbToHueEffect.Dispose();
         }
 
         public void ClearInput()
         {
             input = null;
+            rgbToHueEffect.SetInput(0, null, true);
             inputFormatterEffect.SetInput(0, null, true);
-            compositeEffect.SetInput(0, null, true);
-            compositeEffect.SetInput(1, null, true);
+            mixEffect.SetInput(0, null, true);
+            mixEffect.SetInput(1, null, true);
             crossFadeEffect.SetInput(0, null, true);
         }
 
         public void SetInput(ID2D1Image? input)
         {
             this.input = input;
+
+            rgbToHueEffect.SetInput(0, input, true);
+
+            // デフォルト接続（UpdateLogicで上書きされる可能性あり）
+            // IsUsingRgbToHueの判定にはitemが必要だが、SetInput時点ではまだUpdateが走っていない可能性があるため
+            // 詳細はUpdateで確定させる。ここでは初期化としてつないでおく。
             inputFormatterEffect.SetInput(0, input, true);
-            // Compositeのソース(マスク画像)は常に元画像
-            compositeEffect.SetInput(1, input, true);
+
+            mixEffect.SetInput(1, input, true);
             crossFadeEffect.SetInput(0, input, true);
+        }
+
+        // ヘルパー: HSV変換が必要なチャンネルか？
+        private bool IsUsingRgbToHue(ColorRampEffect.GradientInputChannel channel)
+        {
+            return channel == ColorRampEffect.GradientInputChannel.H ||
+                   channel == ColorRampEffect.GradientInputChannel.S ||
+                   channel == ColorRampEffect.GradientInputChannel.V;
         }
 
         public DrawDescription Update(EffectDescription effectDescription)
@@ -90,34 +132,50 @@ namespace ColorRamp
             var length = effectDescription.ItemDuration.Frame;
             var fps = effectDescription.FPS;
 
-            // モード切替の検知
-            bool toggleChanged = _lastLoadOpacityToggle != item.LoadOpacityToggle;
 
-            // グラデーション設定の変更検知
+            // --- 0. 互換性とパラメータの正規化 ---
+            // LoadOpacityToggleがONの場合、強制的に「入力=A」「KeepAlpha=OFF」として振る舞う
+            var effectiveInputChannel = item.LoadOpacityToggle ? ColorRampEffect.GradientInputChannel.A : item.InputChannel;
+            var effectiveKeepAlpha = item.LoadOpacityToggle ? false : item.KeepAlpha;
+
+
+            // --- 1. 設定変更検知と更新 ---
+
+            // 入力チャンネル設定が変わったか？
+            bool inputSettingChanged = _lastEffectiveInputChannel != effectiveInputChannel;
+
+            // グラデーション設定が変わったか？
             bool gradientChanged = _lastPoints != item.Points ||
                                    _lastCalcType != item.GradientCalculationType ||
                                    _lastInterpType != item.GradientInterpolationType ||
                                    _lastHueInterp != item.GradientInterpolationHSLHSVType;
 
-            // 必要な場合のみ再計算・再設定を行う
-            if (toggleChanged)
+            if (inputSettingChanged)
             {
-                UpdateInputMatrix();
-                UpdatePipelineConnection();
-                _lastLoadOpacityToggle = item.LoadOpacityToggle;
+                // 実効的なチャンネルを渡してパイプライン更新
+                UpdateInputPipeline(effectiveInputChannel);
+                _lastEffectiveInputChannel = effectiveInputChannel;
             }
 
             if (gradientChanged)
             {
                 UpdateGradientTables();
-                // キャッシュ更新
                 _lastPoints = item.Points;
                 _lastCalcType = item.GradientCalculationType;
                 _lastInterpType = item.GradientInterpolationType;
                 _lastHueInterp = item.GradientInterpolationHSLHSVType;
             }
 
-            // --- 2. 合成強度 (Factor) ---
+            // --- 2. MixEffectへのパラメータ反映 ---
+            // MixModeなどのパラメータは毎フレーム送っても軽量なのでここで送る
+            mixEffect.MixMode = (int)item.MixColorSpace;
+            mixEffect.KeepCh1 = item.KeepCh1;
+            mixEffect.KeepCh2 = item.KeepCh2;
+            mixEffect.KeepCh3 = item.KeepCh3;
+            // 互換性を考慮した KeepAlpha を渡す
+            mixEffect.KeepAlpha = effectiveKeepAlpha;
+
+            // --- 3. 合成強度 (Factor) ---
             float factor = (float)item.ColorRampFactor.GetValue(frame, length, fps) / 100.0f;
             factor = Math.Clamp(factor, 0f, 1f);
             factor = 1.0f - factor;
@@ -126,39 +184,66 @@ namespace ColorRamp
             return effectDescription.DrawDescription;
         }
 
-        private void UpdatePipelineConnection()
+        private void UpdateInputPipeline(ColorRampEffect.GradientInputChannel channel)
         {
-            if (item.LoadOpacityToggle)
-            {
-                // [不透明度読み込みモード] -> マスク不要
-                crossFadeEffect.SetInputEffect(1, mapEffect, true);
-            }
-            else
-            {
-                // [輝度読み込みモード] -> マスク必要
-                compositeEffect.SetInputEffect(0, mapEffect, true);
-                crossFadeEffect.SetInputEffect(1, compositeEffect, true);
-            }
-        }
+            // パイプライン構成: [Input] -> (RgbToHue) -> [ColorMatrix] -> [TableTransfer]
 
-        private void UpdateInputMatrix()
-        {
-            var matrix = new Matrix5x4();
+            Matrix5x4 matrix = default; // ゼロ初期化
 
-            if (item.LoadOpacityToggle)
+            // 入力チャンネルに応じて行列と接続先を設定
+            switch (channel)
             {
-                // Alpha読み込み
-                matrix.M41 = 1f; matrix.M42 = 1f; matrix.M43 = 1f; matrix.M44 = 1f;
-            }
-            else
-            {
-                // 輝度読み込み
-                const float r = 0.299f;
-                const float g = 0.587f;
-                const float b = 0.114f;
-                matrix.M11 = r; matrix.M12 = r; matrix.M13 = r; matrix.M14 = r;
-                matrix.M21 = g; matrix.M22 = g; matrix.M23 = g; matrix.M24 = g;
-                matrix.M31 = b; matrix.M32 = b; matrix.M33 = b; matrix.M34 = b;
+                case ColorRampEffect.GradientInputChannel.R:
+                    inputFormatterEffect.SetInput(0, input, true);
+                    matrix.M11 = 1f; matrix.M12 = 1f; matrix.M13 = 1f; matrix.M14 = 1f;
+                    break;
+
+                case ColorRampEffect.GradientInputChannel.G:
+                    inputFormatterEffect.SetInput(0, input, true);
+                    matrix.M21 = 1f; matrix.M22 = 1f; matrix.M23 = 1f; matrix.M24 = 1f;
+                    break;
+
+                case ColorRampEffect.GradientInputChannel.B:
+                    inputFormatterEffect.SetInput(0, input, true);
+                    matrix.M31 = 1f; matrix.M32 = 1f; matrix.M33 = 1f; matrix.M34 = 1f;
+                    break;
+
+                case ColorRampEffect.GradientInputChannel.L:
+                    // Rec.601 Luminance
+                    inputFormatterEffect.SetInput(0, input, true);
+                    const float r = 0.299f;
+                    const float g = 0.587f;
+                    const float b = 0.114f;
+                    matrix.M11 = r; matrix.M12 = r; matrix.M13 = r; matrix.M14 = r;
+                    matrix.M21 = g; matrix.M22 = g; matrix.M23 = g; matrix.M24 = g;
+                    matrix.M31 = b; matrix.M32 = b; matrix.M33 = b; matrix.M34 = b;
+                    break;
+
+                case ColorRampEffect.GradientInputChannel.A: // ★追加: Alpha
+                    inputFormatterEffect.SetInput(0, input, true);
+                    // 元のAlpha値を、出力のR,G,B,Aすべてにコピー
+                    matrix.M41 = 1f; matrix.M42 = 1f; matrix.M43 = 1f; matrix.M44 = 1f;
+                    break;
+
+                case ColorRampEffect.GradientInputChannel.H:
+                case ColorRampEffect.GradientInputChannel.S:
+                case ColorRampEffect.GradientInputChannel.V:
+                    // RgbToHueを経由
+                    inputFormatterEffect.SetInputEffect(0, rgbToHueEffect, true);
+
+                    if (channel == ColorRampEffect.GradientInputChannel.H)
+                    {
+                        matrix.M11 = 1f; matrix.M12 = 1f; matrix.M13 = 1f; matrix.M14 = 1f;
+                    }
+                    else if (channel == ColorRampEffect.GradientInputChannel.S)
+                    {
+                        matrix.M21 = 1f; matrix.M22 = 1f; matrix.M23 = 1f; matrix.M24 = 1f;
+                    }
+                    else // V
+                    {
+                        matrix.M31 = 1f; matrix.M32 = 1f; matrix.M33 = 1f; matrix.M34 = 1f;
+                    }
+                    break;
             }
 
             inputFormatterEffect.SetValue(0, matrix);
@@ -169,19 +254,16 @@ namespace ColorRamp
             var points = item.Points.OrderBy(p => p.Position).ToList();
             if (points.Count < 2)
             {
-                // 簡易的なデフォルト値
                 points = new List<GradientPoint> {
                     new GradientPoint(0, System.Windows.Media.Colors.Black),
                     new GradientPoint(1, System.Windows.Media.Colors.White)
                 };
             }
 
-            // ローカル変数の参照取得
             var calcType = item.GradientCalculationType;
             var interpType = item.GradientInterpolationType;
             var hueInterp = item.GradientInterpolationHSLHSVType;
 
-            // 計算ループ (256回)
             for (int i = 0; i < 256; i++)
             {
                 float t = i / 255.0f;
@@ -210,20 +292,19 @@ namespace ColorRamp
                     resultColor = InterpolateColor(p1.Color, p2.Color, easedT, calcType, hueInterp);
                 }
 
-                // フィールド配列に格納 (newしない)
                 tableR[i] = resultColor.ScR;
                 tableG[i] = resultColor.ScG;
                 tableB[i] = resultColor.ScB;
                 tableA[i] = resultColor.ScA;
             }
 
-            // フィールド配列を転送
             SetTableValue(mapEffect, (int)TableTransferProperties.RedTable, tableR);
             SetTableValue(mapEffect, (int)TableTransferProperties.GreenTable, tableG);
             SetTableValue(mapEffect, (int)TableTransferProperties.BlueTable, tableB);
             SetTableValue(mapEffect, (int)TableTransferProperties.AlphaTable, tableA);
         }
 
+        // --- 補間ロジック (変更なし) ---
         private System.Windows.Media.Color InterpolateColor(System.Windows.Media.Color c1, System.Windows.Media.Color c2, float t, ColorRampEffect.GradientType type, ColorRampEffect.GradientInterpolationHSLHSV hueType)
         {
             if (type == ColorRampEffect.GradientType.RGB)
@@ -290,7 +371,7 @@ namespace ColorRamp
                 b = Cardinal(p0.Color.ScB, p1.Color.ScB, p2.Color.ScB, p3.Color.ScB, localT);
                 a = Cardinal(p0.Color.ScA, p1.Color.ScA, p2.Color.ScA, p3.Color.ScA, localT);
             }
-            else // B-Spline
+            else
             {
                 r = BSpline(p0.Color.ScR, p1.Color.ScR, p2.Color.ScR, p3.Color.ScR, localT);
                 g = BSpline(p0.Color.ScG, p1.Color.ScG, p2.Color.ScG, p3.Color.ScG, localT);
@@ -334,6 +415,32 @@ namespace ColorRamp
             {
                 handle.Free();
             }
+        }
+
+        // --- Enum定義 ---
+
+        private enum RgbToHueProperties
+        {
+            OutputColorSpace = 0
+        }
+
+        private enum RgbToHueOutputColorSpace
+        {
+            HueSaturationValue = 0,
+            HueSaturationLightness = 1
+        }
+
+        private enum ColorMatrixProperties
+        {
+            Matrix = 0,
+            AlphaMode = 1,
+            ClampOutput = 2
+        }
+
+        private enum ColorMatrixAlphaMode
+        {
+            Premultiplied = 0,
+            Straight = 1
         }
     }
 }
