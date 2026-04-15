@@ -89,10 +89,16 @@ float3 HSVToRGB(float3 c)
 
 // ----------------------------------------
 
-float4 main(float4 pos : SV_POSITION, float4 posScene : SCENE_POSITION, float4 uv0 : TEXCOORD0) : SV_Target
+// ★変更点：引数に float4 uv1 : TEXCOORD1 を追加
+float4 main(
+    float4 pos : SV_POSITION,
+    float4 posScene : SCENE_POSITION,
+    float4 uv0 : TEXCOORD0,
+    float4 uv1 : TEXCOORD1) : SV_Target
 {
+    // ★変更点：Input0はuv0、Input1(元画像)はuv1でサンプリングする
     float4 gradColor = InputTexture.Sample(InputSampler, uv0.xy);
-    float4 origColor = OriginalTexture.Sample(OriginalSampler, uv0.xy);
+    float4 origColor = OriginalTexture.Sample(OriginalSampler, uv1.xy);
 
     // Unpremultiply Alpha (Straight RGBに戻して計算)
     float3 c1 = gradColor.rgb;

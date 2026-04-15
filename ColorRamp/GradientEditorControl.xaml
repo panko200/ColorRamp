@@ -7,36 +7,60 @@
              xmlns:y="clr-namespace:YukkuriMovieMaker.Controls;assembly=YukkuriMovieMaker.Controls"
              xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
              mc:Ignorable="d" 
-             d:DesignWidth="300" d:DesignHeight="300">
+             d:DesignWidth="300" d:DesignHeight="400">
     <UserControl.Resources>
         <local:GradientPositionConverter x:Key="PosConverter"/>
         <local:PercentConverter x:Key="PercentConverter"/>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
     </UserControl.Resources>
 
     <StackPanel>
         <DockPanel Margin="0,0,0,5" LastChildFill="False">
             <TextBlock Text="位置調整:" VerticalAlignment="Center" Foreground="#AAA" Margin="0,0,5,0"/>
-            <Button Content="均等" Command="{Binding DistributeCommand}" IsEnabled="{Binding CanDistribute}" Padding="5,2" Margin="0,0,5,0"
-                    ToolTip="両端を固定して間を均等に配置します"/>
-            <Button Content="反転" Command="{Binding ReverseCommand}" IsEnabled="{Binding CanReverse}" Padding="5,2"
-                    ToolTip="グラデーションの並びを反転します"/>
+            <Button Content="均等" Command="{Binding DistributeCommand}" IsEnabled="{Binding CanDistribute}" Padding="5,2" Margin="0,0,5,0"/>
+            <Button Content="反転" Command="{Binding ReverseCommand}" IsEnabled="{Binding CanReverse}" Padding="5,2"/>
         </DockPanel>
-        
+
+        <!-- ★ .grd 書き出し・読み込み行 -->
+        <DockPanel Margin="0,0,0,3" LastChildFill="False">
+            <TextBlock Text="ファイル:" VerticalAlignment="Center" Foreground="#AAA" Margin="0,0,5,0"/>
+            <Button Content="📤 .grd 書き出し" Command="{Binding ExportGrdCommand}" Padding="5,2" Margin="0,0,5,0"
+                    ToolTip="現在のグラデーションを Photoshop 互換の .grd ファイルとして保存します"/>
+            <Button Content="📥 .grd 読み込み" Command="{Binding ImportGrdCommand}" Padding="5,2"
+                    ToolTip=".grd ファイルを読み込んで現在のグラデーションに上書きします"/>
+        </DockPanel>
+
+        <!-- ★ 追加: パレット読み込み行 -->
+        <DockPanel Margin="0,0,0,8" LastChildFill="False">
+            <TextBlock Text="パレット:" VerticalAlignment="Center" Foreground="#AAA" Margin="0,0,5,0"/>
+            <Button Content="📥 .hex" Command="{Binding ImportHexCommand}" Padding="5,2" Margin="0,0,5,0"
+                    ToolTip="Lospec パレット (.hex) を読み込みます。&#x0a;各行が 6 桁の16進数カラーになっているファイルです。"/>
+            <Button Content="📥 .png" Command="{Binding ImportPngCommand}" Padding="5,2"
+                    ToolTip="PNG パレット画像を読み込みます。&#x0a;画像の1行目を左から右にサンプリングしてグラデーションを作成します。"/>
+        </DockPanel>
+
+        <!-- グラデーションバー + サムトラック + シーク縦線 -->
         <Grid Height="35" Margin="0,0,0,8">
-            <Border BorderBrush="#555" BorderThickness="1" CornerRadius="2" 
+            <Border x:Name="GradientBorder"
+                    BorderBrush="#555" BorderThickness="1" CornerRadius="2"
                     Height="26" VerticalAlignment="Bottom"
                     MouseLeftButtonDown="GradientPreview_MouseLeftButtonDown"
-                    Margin="0,0,8,0"
-                    Cursor="Hand">
+                    Margin="0,0,8,0" Cursor="Hand">
                 <Border.Background>
-                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0" 
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0"
+                                         ColorInterpolationMode="ScRgbLinearInterpolation"
                                          GradientStops="{Binding GradientStops}"/>
                 </Border.Background>
             </Border>
+
+            <Canvas x:Name="SeekLineCanvas"
+                    Margin="0,0,8,0" Height="26" VerticalAlignment="Bottom"
+                    IsHitTestVisible="False"/>
+
             <ItemsControl ItemsSource="{Binding Points}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
-                        <Canvas x:Name="ThumbCanvas" 
+                        <Canvas x:Name="ThumbCanvas"
                                 Width="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=Grid}}"/>
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
@@ -45,7 +69,7 @@
                         <Setter Property="Canvas.Left">
                             <Setter.Value>
                                 <MultiBinding Converter="{StaticResource PosConverter}">
-                                    <Binding Path="Position" />
+                                    <Binding Path="PositionValue"/>
                                     <Binding Path="ActualWidth" RelativeSource="{RelativeSource AncestorType=Canvas}"/>
                                 </MultiBinding>
                             </Setter.Value>
@@ -55,13 +79,11 @@
                 </ItemsControl.ItemContainerStyle>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <Thumb DragDelta="Thumb_DragDelta" 
-                               DragStarted="Thumb_DragStarted"
-                               DragCompleted="Thumb_DragCompleted">
+                        <Thumb DragDelta="Thumb_DragDelta" DragStarted="Thumb_DragStarted" DragCompleted="Thumb_DragCompleted">
                             <Thumb.Template>
                                 <ControlTemplate>
                                     <Grid Background="Transparent">
-                                        <Path Data="M 0,0 L 10,0 L 10,10 L 5,15 L 0,10 Z" 
+                                        <Path Data="M 0,0 L 10,0 L 10,10 L 5,15 L 0,10 Z"
                                               Fill="White" Stroke="#555" StrokeThickness="1"
                                               Margin="-5,0,0,0"/>
                                     </Grid>
@@ -73,55 +95,134 @@
             </ItemsControl>
         </Grid>
 
+        <!-- ポイント一覧 -->
         <ItemsControl ItemsSource="{Binding Points}">
             <ItemsControl.ItemTemplate>
                 <DataTemplate>
-                    <Grid Margin="0,2">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="50"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="30"/>
-                        </Grid.ColumnDefinitions>
+                    <StackPanel Margin="0,2">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="50"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="30"/>
+                            </Grid.ColumnDefinitions>
 
-                        <!-- ★変更: KeyDownイベントを追加 -->
-                        <TextBox Grid.Column="0" Margin="0,0,5,0"
-                                 Text="{Binding Position, Converter={StaticResource PercentConverter}, UpdateSourceTrigger=LostFocus}"
-                                 VerticalContentAlignment="Center" HorizontalContentAlignment="Right"
-                                 KeyDown="TextBox_KeyDown">
-                            <i:Interaction.Triggers>
-                                <i:EventTrigger EventName="GotFocus">
-                                    <i:InvokeCommandAction Command="{Binding BeginEditCommand}"/>
-                                </i:EventTrigger>
-                                <i:EventTrigger EventName="LostFocus">
-                                    <i:InvokeCommandAction Command="{Binding EndEditCommand}"/>
-                                </i:EventTrigger>
-                            </i:Interaction.Triggers>
-                        </TextBox>
+                            <TextBox Grid.Column="0" Margin="0,0,5,0"
+                                     Text="{Binding PositionValue, Converter={StaticResource PercentConverter}, UpdateSourceTrigger=LostFocus}"
+                                     VerticalContentAlignment="Center" HorizontalContentAlignment="Right"
+                                     KeyDown="TextBox_KeyDown">
+                                <i:Interaction.Triggers>
+                                    <i:EventTrigger EventName="GotFocus">
+                                        <i:InvokeCommandAction Command="{Binding BeginEditCommand}"/>
+                                    </i:EventTrigger>
+                                    <i:EventTrigger EventName="LostFocus">
+                                        <i:InvokeCommandAction Command="{Binding EndEditCommand}"/>
+                                    </i:EventTrigger>
+                                </i:Interaction.Triggers>
+                            </TextBox>
 
-                        <y:ColorPicker Grid.Column="1" Height="26" 
-                                       Value="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                       EndEdit="ColorPicker_EndEdit">
-                            <i:Interaction.Triggers>
-                                <i:EventTrigger EventName="BeginEdit">
-                                    <i:InvokeCommandAction Command="{Binding BeginEditCommand}"/>
-                                </i:EventTrigger>
-                                <i:EventTrigger EventName="EndEdit">
-                                    <i:InvokeCommandAction Command="{Binding EndEditCommand}"/>
-                                </i:EventTrigger>
-                            </i:Interaction.Triggers>
-                        </y:ColorPicker>
+                            <y:ColorPicker Grid.Column="1" Height="26"
+                                           Value="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                           EndEdit="ColorPicker_EndEdit">
+                                <i:Interaction.Triggers>
+                                    <i:EventTrigger EventName="BeginEdit">
+                                        <i:InvokeCommandAction Command="{Binding BeginEditCommand}"/>
+                                    </i:EventTrigger>
+                                    <i:EventTrigger EventName="EndEdit">
+                                        <i:InvokeCommandAction Command="{Binding EndEditCommand}"/>
+                                    </i:EventTrigger>
+                                </i:Interaction.Triggers>
+                            </y:ColorPicker>
 
-                        <Button Grid.Column="2" Content="🗑" FontSize="14"
-                                Margin="4,0,0,0"
-                                Background="Transparent" BorderBrush="Transparent" Foreground="#DDD"
-                                Command="{Binding DataContext.RemoveCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                IsEnabled="{Binding DataContext.CanRemove, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                CommandParameter="{Binding}"/>
-                    </Grid>
+                            <ToggleButton Grid.Column="2"
+                                          IsChecked="{Binding EnablePositionAnimation, Mode=TwoWay}"
+                                          Content="⏱" FontSize="12" Width="26" Height="26" Margin="4,0,0,0"
+                                          ToolTip="位置アニメーションの ON/OFF">
+                                <ToggleButton.Style>
+                                    <Style TargetType="ToggleButton">
+                                        <Setter Property="Background" Value="Transparent"/>
+                                        <Setter Property="BorderBrush" Value="#555"/>
+                                        <Setter Property="Foreground" Value="#888"/>
+                                        <Style.Triggers>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter Property="Background" Value="#2a4a7a"/>
+                                                <Setter Property="BorderBrush" Value="#4a8adf"/>
+                                                <Setter Property="Foreground" Value="#ccddff"/>
+                                            </Trigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ToggleButton.Style>
+                            </ToggleButton>
+
+                            <Button Grid.Column="3" Content="🗑" FontSize="14" Margin="4,0,0,0"
+                                    Background="Transparent" BorderBrush="Transparent" Foreground="#DDD"
+                                    Command="{Binding DataContext.RemoveCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                    IsEnabled="{Binding DataContext.CanRemove, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                    CommandParameter="{Binding}"/>
+                        </Grid>
+
+                        <!-- 位置アニメーションスライダー -->
+                        <y:AnimationSlider
+                            Visibility="{Binding EnablePositionAnimation, Converter={StaticResource BoolToVis}}"
+                            Loaded="PositionSlider_Loaded" Unloaded="PositionSlider_Unloaded"
+                            StringFormat="F2" Unit="%" DefaultMin="0" DefaultMax="100" DefaultValue="50" Delta="0.1"
+                            Margin="0,2,0,0"/>
+
+                        <!-- ポイントごとの補間ドロップダウン -->
+                        <Grid Margin="0,2,30,0">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding IsLastPoint}" Value="False"/>
+                                                <Condition Binding="{Binding DataContext.EffectItem.UsePerPointInterpolation,
+                                                           RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                           Value="True"/>
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </MultiDataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="50"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="↕補間:" FontSize="10"
+                                       Foreground="#888" VerticalAlignment="Center"
+                                       HorizontalAlignment="Right" Margin="0,0,5,0"/>
+                            <ComboBox Grid.Column="1" Height="22"
+                                      ItemsSource="{Binding DataContext.SegmentInterpolationOptions,
+                                                   RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                      DisplayMemberPath="Name"
+                                      SelectedValuePath="Value"
+                                      SelectedValue="{Binding SegmentInterpolation, Mode=TwoWay}"
+                                      ToolTip="このポイントから次のポイントまでの補間タイプ"/>
+                        </Grid>
+                    </StackPanel>
                 </DataTemplate>
             </ItemsControl.ItemTemplate>
         </ItemsControl>
+
+        <!-- カーブエディタ -->
+        <StackPanel Margin="0,6,0,0"
+                    Visibility="{Binding IsCurveMode, Converter={StaticResource BoolToVis}}">
+            <DockPanel Margin="0,0,0,3" LastChildFill="False">
+                <TextBlock Text="色補間カーブ" VerticalAlignment="Center" Foreground="#AAA"/>
+                <TextBlock Text="  左クリック: 追加 / ドラッグ: 移動 / 右クリック: 削除"
+                           VerticalAlignment="Center" Foreground="#666" FontSize="10"/>
+                <Button Content="リセット" Padding="5,1" Margin="5,0,0,0"
+                        Click="CurveResetButton_Click"/>
+            </DockPanel>
+            <local:GradientCurveEditorControl
+                x:Name="CurveEditor" Height="180"
+                BeginEdit="CurveEditor_BeginEdit"
+                EndEdit="CurveEditor_EndEdit"
+                PointsChanged="CurveEditor_PointsChanged"/>
+        </StackPanel>
+
     </StackPanel>
 </UserControl>
-
-  

@@ -8,6 +8,7 @@ using System.Windows.Media;
 using YukkuriMovieMaker.Commons;
 using YukkuriMovieMaker.Controls;
 using YukkuriMovieMaker.Exo;
+using YukkuriMovieMaker.ItemEditor.CustomVisibilityAttributes;
 using YukkuriMovieMaker.Player.Video;
 using YukkuriMovieMaker.Plugin.Effects;
 
@@ -96,6 +97,7 @@ namespace ColorRamp
 
         [Display(GroupName = "カラーランプ", Name = "色の補間", Description = "グラデーションのイージングを切り替えできます。")]
         [EnumComboBox]
+        [ShowPropertyEditorWhen(nameof(UsePerPointInterpolation), false)]
         public GradientInterpolation GradientInterpolationType { get => gradientInterpolationType; set => Set(ref gradientInterpolationType, value); }
         private GradientInterpolation gradientInterpolationType = GradientInterpolation.Linear;
 
@@ -105,25 +107,74 @@ namespace ColorRamp
             [Display(Name = "イーズ")] Ease,
             [Display(Name = "カーディナル")] Cardinal,
             [Display(Name = "Bスプライン")] BSpline,
-            [Display(Name = "一定")] Constant
+            [Display(Name = "一定")] Constant,
+            [Display(Name = "カスタムカーブ")] Curve
         }
+
+
 
         [Display(GroupName = "カラーランプ", Name = "HSL,HSV色の補間", Description = "グラデーションの色相環の変化方向を設定します。HSL,HSV限定設定です。")]
         [EnumComboBox]
         public GradientInterpolationHSLHSV GradientInterpolationHSLHSVType { get => gradientInterpolationHSLHSVType; set => Set(ref gradientInterpolationHSLHSVType, value); }
         private GradientInterpolationHSLHSV gradientInterpolationHSLHSVType = GradientInterpolationHSLHSV.Near;
 
+        public ImmutableList<GradientCurvePoint> CurvePoints
+        {
+            get => _curvePoints;
+            set
+            {
+                if (_curvePoints == value) return;
+                Set(ref _curvePoints, value);
+            }
+        }
+        private ImmutableList<GradientCurvePoint> _curvePoints
+            = GradientCurveHelper.CreateDefault();
+
+        [Display(GroupName = "カラーランプ", Name = "ポイントごとの補間",
+         Description = "ONにすると、各ポイント間で補間タイプを個別に設定できます。\n" +
+                       "このトグルがONの場合、「色の補間」コンボボックスの設定は無視されます。")]
+        [ToggleSlider]
+        public bool UsePerPointInterpolation
+        {
+            get => usePerPointInterpolation;
+            set => Set(ref usePerPointInterpolation, value);
+        }
+        bool usePerPointInterpolation = false;
+
+        public enum CycleMode
+        {
+            [Display(Name = "なし")] None,
+            [Display(Name = "反復")] Repeat,
+            [Display(Name = "ミラー")] Mirror
+        }
+
+        [Display(GroupName = "サイクル", Name = "モード",
+         Description = "グラデーションを繰り返す方式を選択します。\n" +
+                       "反復: 0→1 を繰り返す\n" +
+                       "ミラー: 0→1→0 を往復する")]
+        [EnumComboBox]
+        public CycleMode GradientCycleMode
+        {
+            get => gradientCycleMode;
+            set => Set(ref gradientCycleMode, value);
+        }
+        private CycleMode gradientCycleMode = CycleMode.None;
+
+        [Display(GroupName = "サイクル", Name = "繰り返し回数",
+                 Description = "グラデーションを何回繰り返すかを指定します。\nアニメーションで回数を変化させることもできます。")]
+        [AnimationSlider("F1", "回", 1, 16)]
+        public Animation CycleCount { get; } = new Animation(2, 1, 16);
         // ★追加: 合成モード設定
         [Display(GroupName = "合成設定", Name = "合成モード", Description = "元画像とグラデーション結果をどの色空間で合成するか選択します。")]
         [EnumComboBox]
         public MixColorSpaceType MixColorSpace { get => mixColorSpace; set => Set(ref mixColorSpace, value); }
-        private MixColorSpaceType mixColorSpace = MixColorSpaceType.RGB;
+        private MixColorSpaceType mixColorSpace = MixColorSpaceType.HSL;
 
         public enum MixColorSpaceType
         {
-            [Display(Name = "RGB")] RGB,
-            [Display(Name = "HSL")] HSL,
-            [Display(Name = "HSV")] HSV
+            [Display(Name = "RGB (加算合成等)")] RGB,
+            [Display(Name = "HSL (着色・輝度維持)")] HSL,
+            [Display(Name = "HSV (明度維持)")] HSV
         }
 
         [Display(GroupName = "合成設定", Name = "CH1 維持 (R / H)", Description = "ONにすると、このチャンネル成分はグラデーションではなく元画像の値を使用します。\nRGBモード: 赤(Red)\nHSL/HSVモード: 色相(Hue)")]
@@ -144,7 +195,7 @@ namespace ColorRamp
         [Display(GroupName = "合成設定", Name = "不透明度(A) 維持", Description = "ONにすると、グラデーションの不透明度ではなく、元画像の不透明度を使用します。")]
         [ToggleSlider]
         public bool KeepAlpha { get => keepAlpha; set => Set(ref keepAlpha, value); }
-        bool keepAlpha = true;
+        bool keepAlpha = true; // デフォルトONが使いやすいかも？
 
         public enum GradientInterpolationHSLHSV
         {
@@ -155,7 +206,7 @@ namespace ColorRamp
         }
 
         // ★変更: 名前と説明を少し調整（機能は「Aトグル」として優先動作）
-        [Display(GroupName = "互換性", Name = "互換不透明度を使用", Description = "オンにすると上記の設定に関わらず、不透明度(Alpha)を入力値として使用します。\n過去バージョンのColorRampを保持するための設定です。")]
+        [Display(GroupName = "互換性", Name = "不透明度(A)を使用", Description = "オンにすると上記の設定に関わらず、不透明度(Alpha)を入力値として使用します。\n過去バージョンのColorRampを保持するための設定です。")]
         [ToggleSlider]
         public bool LoadOpacityToggle { get => loadOpacityToggle; set => Set(ref loadOpacityToggle, value); }
         bool loadOpacityToggle = false;
@@ -171,6 +222,7 @@ namespace ColorRamp
             foreach (var p in Points)
                 yield return p;
             yield return ColorRampFactor;
+            yield return CycleCount;
         }
     }
 }
